@@ -1,58 +1,137 @@
-name: CI - Build, Test & Quality
+name: CI/CD - Build, Test, Publish & Deploy
 
 on:
   push:
-    branches: [main]        # ← déclenchement automatique sur push
+    branches: [main]
   pull_request:
-    branches: [main]        # ← déclenchement sur PR vers main
+    branches: [main]
+
+env:
+  REGISTRY: ghcr.io
+  IMAGE_NAME: ${{ github.repository }}   # ex: username/ci-cd-nginx-demo
 
 jobs:
+  # ─────────────────────────────────────────
+  # JOB 1 : Build & Test
+  # ─────────────────────────────────────────
   build-test:
     runs-on: ubuntu-latest
+    outputs:
+      image-tag: ${{ steps.meta.outputs.tags }}
 
     steps:
       - name: 📥 Récupérer le code
         uses: actions/checkout@v3
 
-      - name: 🔍 Vérifier la présence des fichiers essentiels
+      - name: 🔍 Vérifier la présence des fichiers
         run: |
-          echo "Vérification des fichiers..."
-          test -f Dockerfile && echo "✅ Dockerfile présent" || exit 1
-          test -f nginx/nginx.conf && echo "✅ nginx.conf présent" || exit 1
-          test -f html/index.html && echo "✅ index.html présent" || exit 1
+          test -f Dockerfile && echo "✅ Dockerfile" || exit 1
+          test -f nginx/nginx.conf && echo "✅ nginx.conf" || exit 1
+          test -f html/index.html && echo "✅ index.html" || exit 1
 
-      - name: 🔒 Vérifier l'absence de secrets dans le code
+      - name: 🔒 Scan des secrets
         run: |
-          echo "Scan des secrets..."
-          # Vérifie qu'aucun mot de passe ou clé n'est commité
-          ! grep -r "password=" . --include="*.conf" --include="*.env" && echo "✅ Aucun secret détecté"
+          ! grep -rE "(password|api_key|secret|token)\s*=" . \
+            --include="*.conf" \
+            --include="*.sh" \
+            --include="*.env" \
+          && echo "✅ Aucun secret détecté"
 
-      - name: 🐳 Build de l'image Docker
+      - name: 🐳 Build image Docker
         run: docker build -t nginx-ci-demo .
 
-      - name: ✅ Tester la configuration Nginx
+      - name: ✅ Test configuration Nginx
         run: docker run --rm nginx-ci-demo nginx -t
 
-      - name: 🚀 Lancer le conteneur
+      - name: 🚀 Lancer le conteneur de test
         run: docker run -d --name nginx-test -p 8080:80 nginx-ci-demo
 
-      - name: ⏳ Attendre que Nginx démarre
+      - name: ⏳ Attendre démarrage
         run: sleep 3
 
-      - name: 🌐 Tester la réponse HTTP
+      - name: 🌐 Test HTTP 200
         run: |
           STATUS=$(curl -o /dev/null -s -w "%{http_code}" http://localhost:8080)
-          echo "Status HTTP: $STATUS"
-          [ "$STATUS" = "200" ] && echo "✅ HTTP 200 OK" || exit 1
+          [ "$STATUS" = "200" ] && echo "✅ HTTP 200" || exit 1
 
-      - name: 🏥 Tester l'endpoint /health
+      - name: 🏥 Test /health
         run: |
           STATUS=$(curl -o /dev/null -s -w "%{http_code}" http://localhost:8080/health)
-          echo "Status /health: $STATUS"
-          [ "$STATUS" = "200" ] && echo "✅ /health répond 200" || exit 1
+          [ "$STATUS" = "200" ] && echo "✅ /health OK" || exit 1
 
       - name: 🧹 Nettoyage
-        if: always()   # ← s'exécute même si un step échoue
+        if: always()
         run: |
           docker stop nginx-test 2>/dev/null || true
           docker rm nginx-test 2>/dev/null || true
+
+  # ─────────────────────────────────────────
+  # JOB 2 : Publish vers GHCR
+  # ─────────────────────────────────────────
+  publish:
+    needs: build-test          # ← attend que les tests passent
+    runs-on: ubuntu-latest
+    if: github.ref == 'refs/heads/main'   # ← seulement sur main
+
+    permissions:
+      contents: read
+      packages: write
+
+    steps:
+      - name: 📥 Récupérer le code
+        uses: actions/checkout@v3
+
+      - name: 🔑 Login GitHub Container Registry
+        uses: docker/login-action@v3
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}  # token automatique GitHub
+
+      - name: 🏷️ Générer les métadonnées (tag avec SHA)
+        id: meta
+        uses: docker/metadata-action@v5
+        with:
+          images: ghcr.io/${{ github.repository }}
+          tags: |
+            type=sha,prefix=sha-          # tag: sha-abc1234
+            type=raw,value=latest         # tag: latest
+
+      - name: 🐳 Build & Push vers GHCR
+        uses: docker/build-push-action@v5
+        with:
+          context: .
+          push: true
+          tags: ${{ steps.meta.outputs.tags }}
+          labels: ${{ steps.meta.outputs.labels }}
+
+      - name: 📋 Résumé de publication
+        run: |
+          echo "## 🐳 Image publiée" >> $GITHUB_STEP_SUMMARY
+          echo '```' >>  $ GITHUB_STEP_SUMMARY
+          echo " $ {{ steps.meta.outputs.tags }}" >> $GITHUB_STEP_SUMMARY
+          echo '```' >> $GITHUB_STEP_SUMMARY
+
+  # ─────────────────────────────────────────
+  # JOB 3 : Validation manuelle + Déploiement
+  # ─────────────────────────────────────────
+  deploy:
+    needs: publish
+    runs-on: ubuntu-latest
+    environment: production     # ← déclenche la validation manuelle
+
+    steps:
+      - name: 🚀 Simulation de déploiement en production
+        run: |
+          echo "✅ Validation manuelle approuvée !"
+          echo "🚀 Déploiement de l'image : ghcr.io/${{ github.repository }}:latest"
+          echo "📦 SHA du commit : ${{ github.sha }}"
+          echo "👤 Déployé par : ${{ github.actor }}"
+          echo "🕐 Date : $(date)"
+
+      - name: 📋 Résumé déploiement
+        run: |
+          echo "## 🚀 Déploiement réussi !" >> $GITHUB_STEP_SUMMARY
+          echo "- **Image** : \`ghcr.io/${{ github.repository }}:sha-$(echo ${{ github.sha }} | cut -c1-7)\`" >> $GITHUB_STEP_SUMMARY
+          echo "- **Environnement** : Production" >> $GITHUB_STEP_SUMMARY
+          echo "- **Commit** : ${{ github.sha }}" >> $GITHUB_STEP_SUMMARY
