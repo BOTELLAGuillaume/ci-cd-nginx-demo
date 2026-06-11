@@ -1,7 +1,10 @@
-name: CI - Build & Test Nginx
+name: CI - Build, Test & Quality
 
 on:
-  workflow_dispatch:  # Déclenchement manuel pour le niveau 1
+  push:
+    branches: [main]        # ← déclenchement automatique sur push
+  pull_request:
+    branches: [main]        # ← déclenchement sur PR vers main
 
 jobs:
   build-test:
@@ -18,6 +21,12 @@ jobs:
           test -f nginx/nginx.conf && echo "✅ nginx.conf présent" || exit 1
           test -f html/index.html && echo "✅ index.html présent" || exit 1
 
+      - name: 🔒 Vérifier l'absence de secrets dans le code
+        run: |
+          echo "Scan des secrets..."
+          # Vérifie qu'aucun mot de passe ou clé n'est commité
+          ! grep -r "password=" . --include="*.conf" --include="*.env" && echo "✅ Aucun secret détecté"
+
       - name: 🐳 Build de l'image Docker
         run: docker build -t nginx-ci-demo .
 
@@ -30,8 +39,20 @@ jobs:
       - name: ⏳ Attendre que Nginx démarre
         run: sleep 3
 
-      - name: 🌐 Vérifier que Nginx répond
-        run: curl -f http://localhost:8080 && echo "✅ Nginx répond correctement"
+      - name: 🌐 Tester la réponse HTTP
+        run: |
+          STATUS=$(curl -o /dev/null -s -w "%{http_code}" http://localhost:8080)
+          echo "Status HTTP: $STATUS"
+          [ "$STATUS" = "200" ] && echo "✅ HTTP 200 OK" || exit 1
+
+      - name: 🏥 Tester l'endpoint /health
+        run: |
+          STATUS=$(curl -o /dev/null -s -w "%{http_code}" http://localhost:8080/health)
+          echo "Status /health: $STATUS"
+          [ "$STATUS" = "200" ] && echo "✅ /health répond 200" || exit 1
 
       - name: 🧹 Nettoyage
-        run: docker stop nginx-test && docker rm nginx-test
+        if: always()   # ← s'exécute même si un step échoue
+        run: |
+          docker stop nginx-test 2>/dev/null || true
+          docker rm nginx-test 2>/dev/null || true
